@@ -1,6 +1,6 @@
 // ================================================================
 // Smart Spirometer — ESP32 firmware
-// VL53L0X piston tracking + optional SSD1306 OLED + web app
+// VL53L0X piston tracking + web app (headless — no OLED)
 //
 // NETWORKING: Access Point ONLY. The device hosts its own WiFi
 // network and is reachable only through it — it never joins a home
@@ -12,19 +12,21 @@
 //
 // Hardware:
 //   ESP32 dev board
-//   VL53L0X ToF sensor  (I2C: SCL=15, SDA=4)
-//   SSD1306 128x64 OLED (optional, same I2C bus, addr 0x3C)
+//   VL53L0X ToF sensor, socketed directly into the board:
+//     3V3, GND, GPIO 15, GPIO 2 (I2C orientation auto-detected)
 //   AirLife 4000mL incentive spirometer
 //
+// NOTE: GPIO 2 is tied to the board's status LED, so the I2C bus is
+// LOCKED to 100 kHz. Do NOT raise it to 400 kHz — higher speeds cause
+// signal degradation and timeout errors.
+//
 // Libraries (Library Manager):
-//   VL53L0X (Pololu), Adafruit GFX, Adafruit SSD1306,
+//   Adafruit_VL53L0X,
 //   ESP Async WebServer (ESP32Async), Async TCP (ESP32Async), ArduinoJson
 // ================================================================
 
 #include <Wire.h>
-#include <VL53L0X.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include "Adafruit_VL53L0X.h"
 
 #include <WiFi.h>
 #include <AsyncTCP.h>
@@ -34,38 +36,16 @@
 
 #include "webpage.h"   // INDEX_HTML lives here
 
-VL53L0X sensor;
+// ---- VL53L0X socketed pins (orientation auto-detected in setup) ----
+#define PIN_A 15
+#define PIN_B 2
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-#define SCREEN_ADDRESS 0x3C
+Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// The OLED is OPTIONAL. If it isn't on the bus, the firmware runs
-// headless — the web app is the full interface. Drawing calls still
-// write to the RAM buffer harmlessly; only the flush touches I2C,
-// so that's the one thing we guard.
-bool displayOK = false;
-void showBuffer() { if (displayOK) display.display(); }
-
-// Optional status LED. GPIO 4 is now the I2C SDA line, so there is no
-// LED pin by default. Set this to a free GPIO if you ever wire one.
+// Optional status LED (set to a free GPIO if you ever wire one).
 const int LED_PIN    = -1;
 
 void setLed(bool on) { if (LED_PIN >= 0) digitalWrite(LED_PIN, on ? HIGH : LOW); }
-
-// ---- I2C bus (VL53L0X, plus the SSD1306 if one is attached) ----
-// Sensor header order is VIN / GND / SCL / SDA, so:
-//   3V3 -> VIN, GND -> GND, D15 -> SCL, D4 -> SDA
-// SDA deliberately skips D2: GPIO 2 is a strapping pin that must be
-// LOW to enter download mode, and the sensor's I2C pull-up holds it
-// HIGH — which blocks flashing ("Wrong boot mode detected (0xb)").
-// GPIO 4 has no strapping role, so uploads work with the sensor
-// attached. Wire D2 to nothing.
-const int I2C_SCL = 15;
-const int I2C_SDA = 4;
 
 // ================================================================
 // WiFi — Access Point only
@@ -93,6 +73,10 @@ AsyncWebSocket ws("/ws");
 
 unsigned long lastBroadcast = 0;
 const unsigned long BROADCAST_INTERVAL_MS = 100;   // ~10 Hz push to the phone
+
+// ---- Sensor sampling (non-blocking, matches 20 ms timing budget ≈ 50 Hz) ----
+unsigned long lastSample = 0;
+const unsigned long SAMPLE_INTERVAL_MS = 20;
 
 // ---- Reset requested from the web task (handled safely in loop()) ----
 volatile bool resetRequested = false;
@@ -472,223 +456,70 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 }
 
 // ================================================================
-// Screens (OLED)
+// Sensor init: socketed VL53L0X with pin-orientation auto-fallback
 // ================================================================
 
-// Small top-of-screen header: "AP 192.168.4.1" (14 chars = 84px, fits).
-// Returns the y offset where the rest of the screen may start.
-int drawWifiHeader() {
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print("AP ");
-  display.print(deviceIP);
-  return 10;
+bool initToFSensor() {
+  // Orientation 1: SDA = 15, SCL = 2
+  Wire.begin(PIN_A, PIN_B);
+  Wire.setClock(100000);   // LOCKED at 100 kHz — GPIO 2 shares the status LED
+
+  if (!lox.begin()) {
+    // Orientation 2: SDA = 2, SCL = 15
+    Wire.end();
+    Wire.begin(PIN_B, PIN_A);
+    Wire.setClock(100000);
+
+    if (!lox.begin()) {
+      return false;
+    }
+  }
+
+  // High-speed refresh: 20,000 us timing budget -> ~50 Hz sampling
+  lox.setMeasurementTimingBudgetMicroSeconds(20000);
+  return true;
 }
 
-// Shown before a target volume is entered over Serial or the web page
-void showWaitingForTarget() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  int y = drawWifiHeader();
-  display.setTextSize(1);
-  display.setCursor(0, y + 12);
-  display.println("Set target volume");
-  display.setCursor(0, y + 26);
-  display.println("via Serial or web.");
-  showBuffer();
-}
+// ================================================================
+// Session phases (previously OLED screens — now Serial + web state)
+// ================================================================
 
-// Idle screen: target set, waiting for the patient to start inhaling
-void showIdleScreen() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  drawWifiHeader();
-
-  display.setTextSize(1);
-  display.setCursor(22, 14);
-  display.println("Target Volume");
-
-  display.setTextSize(3);
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%d", toMl(targetVolume));
-  int w = strlen(buf) * 18;  // textSize 3 = 18px/char
-  display.setCursor(max(0, (SCREEN_WIDTH - w) / 2), 26);
-  display.println(buf);
-
-  display.setTextSize(1);
-  display.setCursor(22, 55);
-  display.println("Inhale to start");
-  showBuffer();
-}
-
-// Live screen during the breath: volume vs target, flow + time,
-// progress bar, and a real-time hint line
-void updateDisplay(float volume, float flow, float elapsed) {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-
-  display.setCursor(0, 0);
-  display.println("-- Spirometer --");
-
-  display.setCursor(0, 12);
-  display.print("Vol:  ");
-  display.print(toMl(volume));
-  display.print(" / ");
-  display.print(toMl(targetVolume));
-  display.println(" mL");
-
-  display.setCursor(0, 24);
-  display.print("Flow: ");
-  display.print(toMl(flow));
-  display.print(" mL/s  ");
-  display.print(elapsed, 1);
-  display.println("s");
-
-  // Progress bar (fills as volume approaches target)
-  display.drawRect(0, 36, 128, 10, SSD1306_WHITE);
-  float frac = (targetVolume > 0) ? volume / targetVolume : 0;
-  frac = constrain(frac, 0.0f, 1.0f);
-  int fillW = (int)(126 * frac);
-  if (fillW > 0) display.fillRect(1, 37, fillW, 8, SSD1306_WHITE);
-
-  // Live hint
-  display.setCursor(0, 52);
-  display.print(">> ");
-  display.println(liveHint(flow, elapsed));
-
-  showBuffer();
-}
-
-// Hold phase: count down 5..1 while showing the score they locked in
+// Hold phase: count down 5..1 while the app shows the locked-in score
 void holdCountdown(float score) {
   webState = "Hold";
   for (int n = HOLD_SECONDS; n >= 1; n--) {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-
-    display.setTextSize(1);
-    display.setCursor(34, 2);
-    display.println("Hold it!");
-
-    display.setTextSize(4);            // big centered number
-    display.setCursor(54, 18);
-    display.println(n);
-
-    display.setTextSize(1);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%d mL", toMl(score));
-    int w = strlen(buf) * 6;
-    display.setCursor((SCREEN_WIDTH - w) / 2, 54);
-    display.println(buf);
-
-    showBuffer();
+    Serial.print(">> Hold it! "); Serial.print(n);
+    Serial.print("  ("); Serial.print(toMl(score)); Serial.println(" mL)");
     broadcastState();   // keep the phone in sync during the countdown
     delay(1000);
   }
 }
 
-// Results screen: goal vs score, encouragement, and flow next-step
+// Results: goal vs score, encouragement, and flow next-step
 void showResultsScreen(float score, float goal) {
   setLed(false);
   sessionEnded = true;
   webState = "Done";
 
   bool hitGoal = (score >= goal);
-
-  // Encouragement — "Great job!" fits one big line; the miss case splits in two
-  String enc1, enc2;
-  if (hitGoal) { enc1 = "Great job!"; enc2 = ""; }
-  else         { enc1 = "Good";       enc2 = "effort!"; }
-
-  // Flow-based next step (from the flow accumulated during the inhale)
   String flowClass = classifyFlow();
-  String flowMsg = "";
-  if      (flowClass == "TOO FAST") flowMsg = "Too fast!";
-  else if (flowClass == "TOO SLOW") flowMsg = "Too slow!";
-  // GOOD pace -> no correction line
 
+  Serial.println(hitGoal ? ">> Great job!" : ">> Good effort!");
   Serial.print("Results -> goal "); Serial.print(toMl(goal));
   Serial.print("  score "); Serial.print(toMl(score));
   Serial.print("  flow "); Serial.println(flowClass);
 
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-
-  // Encouragement (textSize 2)
-  display.setTextSize(2);
-  display.setCursor(max(0, (SCREEN_WIDTH - (int)enc1.length() * 12) / 2), 0);
-  display.println(enc1);
-  if (enc2.length() > 0) {
-    display.setCursor(max(0, (SCREEN_WIDTH - (int)enc2.length() * 12) / 2), 16);
-    display.println(enc2);
-  }
-
-  // Goal / Score (textSize 1) — same toMl() the app receives
-  display.setTextSize(1);
-  char buf[24];
-  snprintf(buf, sizeof(buf), "GOAL:  %d mL", toMl(goal));
-  display.setCursor(4, 34);
-  display.println(buf);
-
-  snprintf(buf, sizeof(buf), "SCORE: %d mL", toMl(score));
-  display.setCursor(4, 44);
-  display.println(buf);
-
-  // Flow feedback (textSize 1, centered)
-  if (flowMsg.length() > 0) {
-    display.setCursor(max(0, (SCREEN_WIDTH - (int)flowMsg.length() * 6) / 2), 54);
-    display.println(flowMsg);
-  }
-
-  showBuffer();
   broadcastState();   // push the final Done state immediately
 }
 
-// Exhale (misuse) screen: skips the hold/score entirely, just corrects them
+// Exhale (misuse): skips the hold/score entirely, just corrects them
 void showExhaleScreen() {
   setLed(false);
   sessionEnded = true;
   webState = "Done";
 
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(10, 18);
-  display.println("Inhale");
-  display.setCursor(34, 38);
-  display.println("only.");
-  showBuffer();
+  Serial.println(">> Inhale only.");
   broadcastState();
-}
-
-// Boot screen: how to reach the device
-void showConnectScreen() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(16, 4);
-  display.println("Connect to WiFi:");
-  display.setCursor(4, 18);
-  display.println(AP_SSID);
-  display.setCursor(4, 30);
-  display.print("Pass: ");
-  display.println(AP_PASS);
-  display.setCursor(4, 46);
-  display.println("Then browse to");
-  display.setCursor(4, 56);
-  display.print("http://");
-  display.println(deviceIP);
-  showBuffer();
-  if (displayOK) delay(2500);   // no point holding a screen nobody can see
-}
-
-// Redraw whichever screen the session state calls for
-void redrawCurrentScreen() {
-  if (targetVolume < 0)      showWaitingForTarget();
-  else if (sessionEnded)     showResultsScreen(sessionScore, targetVolume);
-  else if (!breathStarted)   showIdleScreen();
-  // mid-breath: updateDisplay() repaints on the next loop pass anyway
 }
 
 // ================================================================
@@ -718,8 +549,8 @@ void resetSession() {
 
   setLed(true);
   Serial.println(">> Session reset — ready for a new breath.");
-  if (targetVolume > 0) showIdleScreen();
-  else                  showWaitingForTarget();
+  if (targetVolume > 0) Serial.println("Inhale to start...");
+  else                  Serial.println("Set target volume via Serial or web.");
   broadcastState();
 }
 
@@ -735,7 +566,6 @@ void startWiFi() {
   deviceIP = WiFi.softAPIP().toString();
   Serial.print("AP '"); Serial.print(AP_SSID);
   Serial.print("' up. Browse to http://"); Serial.println(deviceIP);
-  showConnectScreen();
 }
 
 // ================================================================
@@ -744,36 +574,16 @@ void startWiFi() {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(I2C_SDA, I2C_SCL);
+  delay(1000);   // allow hardware & power to settle
 
   if (LED_PIN >= 0) pinMode(LED_PIN, OUTPUT);
 
-  // ---- OLED: probe the bus, but carry on without it ----
-  Wire.beginTransmission(SCREEN_ADDRESS);
-  if (Wire.endTransmission() == 0) {
-    displayOK = display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
+  // ---- VL53L0X (socketed, orientation auto-fallback, 100 kHz, ~50 Hz) ----
+  if (!initToFSensor()) {
+    Serial.println("[ERROR] Could not communicate with VL53L0X — check socket seating.");
+    while (1) { delay(100); }
   }
-  if (displayOK) {
-    Serial.println("SSD1306 found.");
-  } else {
-    Serial.println("SSD1306 not found — running headless (web app only).");
-  }
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(20, 28);
-  display.println("Initializing...");
-  showBuffer();
-
-  if (!sensor.init()) {
-    display.clearDisplay();
-    display.setCursor(0, 28);
-    display.println("Sensor not found!");
-    showBuffer();
-    Serial.println("Sensor not found — check wiring.");
-    while (1);
-  }
+  Serial.println("VL53L0X ready — high-speed sampling enabled (~50 Hz).");
 
 // ---- WiFi FIRST: bring up the network stack before the server binds ----
   prefs.begin("spiro", false);
@@ -787,8 +597,14 @@ void setup() {
   startWiFi();   // device hosts its own network; no client mode
 
   // ---- Web routes (registered AFTER WiFi is up) ----
+  // NOTE: send_P() is deprecated in the ESP32Async fork of
+  // ESPAsyncWebServer and can serve an empty body (Content-Length: 0)
+  // for large PROGMEM pages. On ESP32, PROGMEM is memory-mapped flash,
+  // so a plain response with an explicit length works reliably.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send_P(200, "text/html", INDEX_HTML);
+    AsyncWebServerResponse *res = request->beginResponse(
+        200, "text/html", (const uint8_t*)INDEX_HTML, strlen(INDEX_HTML));
+    request->send(res);
   });
 
   // Goal setting from the phone (same validation as the Serial path).
@@ -916,12 +732,9 @@ void setup() {
   server.addHandler(&ws);
   server.begin();
 
-  delay(1000);
-  sensor.startContinuous();
   setLed(true);
 
   Serial.println("Enter target volume in mL (e.g. 2000):");
-  showWaitingForTarget();
 }
 
 // ================================================================
@@ -969,7 +782,6 @@ void loop() {
         targetVolume = val;
         Serial.print("Target set to "); Serial.print(targetVolume, 0);
         Serial.println(" mL. Inhale to start...");
-        showIdleScreen();
       } else {
         Serial.println("Invalid. Enter a number between 1 and 4000:");
       }
@@ -980,9 +792,16 @@ void loop() {
   // ---- Session finished: freeze on the result until New Breath / reset ----
   if (sessionEnded) return;
 
+  // ---- Non-blocking sample gate: aligns with the 20 ms timing budget ----
+  if (millis() - lastSample < SAMPLE_INTERVAL_MS) return;
+  lastSample = millis();
+
   // ---- Read sensor ----
-  int rawDist = sensor.readRangeContinuousMillimeters();
-  if (sensor.timeoutOccurred() || rawDist >= 8190) return;
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);
+  if (measure.RangeStatus == 4) return;   // out of range / invalid reading
+  int rawDist = measure.RangeMilliMeter;
+  if (rawDist >= 8190) return;
 
   // ---- Detect breath start ----
   if (!breathStarted && rawDist < BREATH_START_THRESHOLD) {
@@ -1057,19 +876,13 @@ void loop() {
     }
   }
 
-  // ---- Live display ----
-  if (!breathStarted) {
-    showIdleScreen();
-  } else {
-    updateDisplay(volume, flow, elapsed);
-  }
-
-  // ---- Serial log (for empirical tuning) ----
+  // ---- Serial log (for empirical tuning; hint was the OLED bottom line) ----
   Serial.print(rawDist); Serial.print(" mm\t| ");
   Serial.print(volume, 0); Serial.print(" mL\t| ");
   Serial.print(flow, 0); Serial.print(" mL/s\t| ");
   if (breathStarted) {
-    Serial.print(elapsed, 1); Serial.println(" s");
+    Serial.print(elapsed, 1); Serial.print(" s\t| ");
+    Serial.println(liveHint(flow, elapsed));
   } else {
     Serial.println("--");
   }
@@ -1084,6 +897,4 @@ void loop() {
     showResultsScreen(sessionScore, targetVolume);
     return;
   }
-
-  delay(20);
 }
