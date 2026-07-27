@@ -1,9 +1,51 @@
-# Smart Spirometer — ESP32 Firmware + Mobile Dashboard
+# Smart Spirometer — ESP32 Firmware + Mobile App UI (v3)
+
+## What's new in v3 (Home-screen UI)
+
+The web dashboard is now a multi-view app matching the Home-screen mock:
+
+- **Home tab** — greeting ("Good morning, [name]"), Today's goal card with a
+  gradient progress ring + lung icon, Next session countdown card, and a
+  Recovery progress ("Day N of 21") card with sprout graphic.
+- **Session view** — the live breath screen (volume, progress bar, flow,
+  New Breath, volume goal). Opened by tapping the Next-session card;
+  auto-opens when a breath starts.
+- **Profile tab (functional)** — name, daily breath goal, and program length,
+  saved to ESP32 NVS via `POST /profile`. Includes a "Restart recovery"
+  option that makes today Day 1.
+- **History / Trends tabs** — styled placeholders for now.
+
+**How day tracking works on a clockless ESP32:** the page sends the phone's
+local time over the WebSocket on connect (`{"epoch": ...}`); the firmware
+keeps an offset and computes day rollovers at local midnight. Completed
+sessions (any breath that reaches the results screen) increment today's
+count, persist in NVS, and reset the 1-hour next-session countdown
+(`Ready when you are` -> `In 59m` -> `Due now`).
+
+---
+
+# Previous: v2 notes
 
 Add-on device for a standard AirLife 4000 mL incentive spirometer. A VL53L0X
 time-of-flight sensor tracks piston displacement; the ESP32 computes volume and
-flow in real time, drives an SSD1306 OLED for patient-facing feedback, and now
-also hosts a mobile web dashboard over its own WiFi hotspot.
+flow in real time, drives an SSD1306 OLED for patient-facing feedback, and
+hosts a mobile web dashboard.
+
+## What's new in v2
+
+1. **Idle deadzone** — pre-breath sensor jitter (the -30 to 100 mL band) is
+   reported to the app as a clean 0 mL / Idle. Internal signal processing is
+   unaffected.
+2. **OLED/app consistency** — one rounding rule (`toMl()`) and one final-result
+   variable (`sessionScore`) feed both displays; the firmware sends pre-rounded
+   integers so the browser does no math. The two readouts now match to the mL.
+3. **New Breath button** — resets the trial from the app. No more pressing
+   EN/RST between breaths. Works from the Done screen or mid-breath.
+4. **Access Point only** — the device hosts its own network at a fixed
+   address; it never joins external WiFi.
+
+> **Note:** GPIO 0 (BOOT) has no firmware function. It was briefly a WiFi
+> mode toggle; with AP-only networking that toggle is gone.
 
 ## File structure
 
@@ -11,73 +53,87 @@ also hosts a mobile web dashboard over its own WiFi hotspot.
 SmartSpirometer/
 ├── README.md                       <- you are here
 └── SmartSpirometer/                <- Arduino sketch folder (name must match the .ino)
-    ├── SmartSpirometer.ino         <- full firmware: sensing, OLED, WiFi AP, web server
+    ├── SmartSpirometer.ino         <- full firmware: sensing, OLED, WiFi, web server
     └── webpage.h                   <- embedded mobile dashboard (PROGMEM HTML/CSS/JS)
 ```
 
-Open `SmartSpirometer/SmartSpirometer.ino` in the Arduino IDE (or VSCode with
-the Arduino extension). `webpage.h` is pulled in automatically via `#include`.
-
 ## Libraries required
-
-Install via Arduino IDE Library Manager:
 
 | Library            | Notes                                          |
 |--------------------|------------------------------------------------|
 | VL53L0X            | Pololu version                                 |
 | Adafruit GFX       |                                                |
 | Adafruit SSD1306   |                                                |
-| ESPAsyncWebServer  | mathieucarbou or lacamera fork both work       |
-| AsyncTCP           | ESP32 version — NOT `ESPAsyncTCP` (ESP8266)    |
+| ESP Async WebServer| by **ESP32Async** (maintained fork)            |
+| Async TCP          | by **ESP32Async** — NOT `ESPAsyncTCP` (ESP8266)|
 | ArduinoJson        | v6+                                            |
 
-Board: any ESP32 dev board (Tools -> Board -> ESP32 Dev Module).
+`Preferences` ships with the ESP32 core — nothing to install.
 
-## Wiring (unchanged from previous build)
-
-Both the VL53L0X and the SSD1306 share one I2C bus:
+## Wiring
 
 | Signal | ESP32 pin |
 |--------|-----------|
-| SDA    | GPIO 21   |
-| SCL    | GPIO 22   |
+| SCL    | GPIO 15   |
+| SDA    | GPIO 4    |
 | LED    | GPIO 4    |
-| Button | GPIO 0    |
+| BOOT   | GPIO 0    | (unused by firmware)
 
-## Using the mobile dashboard
+Three of the sensor's four pins line up with the `3V3 / GND / D15` run;
+SDA jumps past D2 to D4 (see below).
 
-1. Flash the firmware and power the device.
-2. On your phone, join the WiFi network **SmartSpirometer**
-   (password `breok\\\\athe123` — change `AP_SSID` / `AP_PASS` in the .ino if you like).
-3. Your phone may warn "no internet connection" — that's expected; stay connected.
-4. Open a browser and go to **http://192.168.4.1**
+**The OLED is optional.** If no SSD1306 is detected on the bus at boot,
+the firmware logs `running headless (web app only)` and continues
+normally — all session logic, WiFi, history, and the web app work
+unchanged. Reattach the display any time and it lights up again on the
+next reset.
 
-The dashboard shows:
+### Why SDA skips GPIO 2
 
-- **Live volume** (large readout) with a progress bar toward the goal
-- **Flow rate** and **peak volume (score)** for the current breath
-- **Session state**: Idle -> Breathing -> Hold -> Done
-- A **Set goal** field (1–4000 mL). This does the same thing as typing a target
-  into the Serial Monitor — whichever happens first wins.
+The sensor header (VIN / GND / SCL / SDA) lines up with `3V3 · GND · D15 · D2`,
+but **GPIO 2 must not be used for I2C on this board**. It is a strapping pin
+that has to read LOW to enter download mode, and the sensor's onboard I2C
+pull-up holds it HIGH — producing:
 
-Data is pushed from the ESP32 to the phone over a WebSocket at ~10 Hz, so there
-is no polling and the sensor loop keeps its normal 20 ms cadence
-(ESPAsyncWebServer handles requests off the main loop).
+```
+A fatal error occurred: Failed to connect to ESP32: Wrong boot mode detected (0xb)!
+```
 
-## Notes / current limitations
+No button sequence fixes this; holding BOOT only controls GPIO 0. So SDA
+skips one pin over to **D4**, which has no strapping role:
 
-- After a session ends (`Done`), the firmware freezes on the results screen
-  until a hardware reset — same behavior as before. A web "reset session"
-  button is a natural next feature.
-- The webpage is embedded in flash as a PROGMEM string. If it grows into a
-  multi-page app later, migrating to LittleFS is straightforward.
-- During the 5-second hold countdown, the OLED loop uses `delay(1000)`; the
-  dashboard still receives one state push per second inside the countdown.
+```
+3V3 -> VIN      GND -> GND      D15 -> SCL      D4 -> SDA      (D2 unused)
+```
+
+With that wiring, uploads work with the sensor connected.
+
+## Connecting
+
+The device hosts its own WiFi network. **There is no station/client
+mode** — the ESP32 never joins a home or public network, so it is never
+exposed on a shared network and the address never changes.
+
+1. On your phone, join the WiFi network **SmartSpirometer**
+   (password `breathe123`).
+2. Ignore the "no internet connection" warning — that's expected.
+3. Open **http://192.168.4.1** (type `http://` so the browser doesn't
+   treat it as a search).
+
+If an OLED is attached, the boot screen shows the network name,
+password, and URL. The same details are printed to Serial at 115200.
+
+## Session flow
+
+Idle -> Breathing -> Hold (5 s countdown) -> Done. From Done, tap
+**New Breath** in the app to start the next trial with the same target
+(change the target anytime via the Set goal field or Serial).
 
 ## Tunable knobs (in the .ino)
 
 | Constant           | Default | Purpose                                        |
 |--------------------|---------|------------------------------------------------|
+| IDLE_DEADZONE_ML   | 100     | Pre-breath readings below this display as 0    |
 | STOP_NEG_COUNT     | 4       | Consecutive low-flow reads to confirm a stop (raise to 6–8 if patients pause mid-inhale) |
 | STOP_FLOW_THRESH   | 0.0     | Flow below this counts as "not inhaling" (raise to ~30 if flat-zero hold fails to trigger) |
 | HOLD_SECONDS       | 5       | Hold countdown length                          |
