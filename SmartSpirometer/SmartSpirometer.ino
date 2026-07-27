@@ -81,6 +81,13 @@ const unsigned long SAMPLE_INTERVAL_MS = 20;
 // ---- Reset requested from the web task (handled safely in loop()) ----
 volatile bool resetRequested = false;
 
+// ---- Explicit start (UX fix): a breath can only begin after the user
+// arms one via /startBreath (the app's "Start breathing" button).
+// It disarms when a session ends or is exited, so piston movement /
+// sensor jitter can never auto-start a breath. ----
+volatile bool startRequested = false;
+bool armed = false;
+
 // ================================================================
 // Profile & recovery tracking (Home-screen UI)
 // ================================================================
@@ -498,6 +505,7 @@ void holdCountdown(float score) {
 // Results: goal vs score, encouragement, and flow next-step
 void showResultsScreen(float score, float goal) {
   setLed(false);
+  armed = false;          // next breath requires an explicit Start
   sessionEnded = true;
   webState = "Done";
 
@@ -515,6 +523,7 @@ void showResultsScreen(float score, float goal) {
 // Exhale (misuse): skips the hold/score entirely, just corrects them
 void showExhaleScreen() {
   setLed(false);
+  armed = false;          // next breath requires an explicit Start
   sessionEnded = true;
   webState = "Done";
 
@@ -624,9 +633,17 @@ void setup() {
     request->send(400, "text/plain", "Enter a number between 1 and 4000");
   });
 
-  // New Breath: just raise a flag — loop() performs the reset safely
+  // New Breath: just raise a flag — loop() performs the reset safely.
+  // This resets WITHOUT arming: the device returns to standby.
   server.on("/newBreath", HTTP_POST, [](AsyncWebServerRequest *request) {
     resetRequested = true;
+    request->send(200, "text/plain", "OK");
+  });
+
+  // Start Breath: reset AND arm detection — the only way a breath can
+  // begin. Same safe flag pattern; loop() does the work.
+  server.on("/startBreath", HTTP_POST, [](AsyncWebServerRequest *request) {
+    startRequested = true;
     request->send(200, "text/plain", "OK");
   });
 
@@ -746,7 +763,18 @@ void loop() {
   //      so "New Breath" works from the Done screen) ----
   if (resetRequested) {
     resetRequested = false;
+    armed = false;          // reset to standby — do NOT auto-start
     resetSession();
+  }
+
+  // ---- Web-requested start: reset, then arm breath detection ----
+  if (startRequested) {
+    startRequested = false;
+    resetSession();
+    armed = true;
+    webState = "Ready";     // armed, waiting for the inhale
+    Serial.println(">> Armed — inhale to begin.");
+    broadcastState();
   }
 
   // ---- Web-requested profile save (same safe handoff pattern) ----
@@ -803,8 +831,8 @@ void loop() {
   int rawDist = measure.RangeMilliMeter;
   if (rawDist >= 8190) return;
 
-  // ---- Detect breath start ----
-  if (!breathStarted && rawDist < BREATH_START_THRESHOLD) {
+  // ---- Detect breath start (only when the user has armed one) ----
+  if (armed && !breathStarted && rawDist < BREATH_START_THRESHOLD) {
     breathStarted = true;
     breathStartTime = millis();
     Serial.println(">> Breath started.");
@@ -828,7 +856,7 @@ void loop() {
   if (!breathStarted) {
     webVolume = (volume < IDLE_DEADZONE_ML) ? 0 : volume;
     webFlow   = 0;
-    webState  = "Idle";
+    webState  = armed ? "Ready" : "Idle";
   } else {
     webVolume = volume;
     webFlow   = flow;

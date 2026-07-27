@@ -1002,7 +1002,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   function startBreathing() {
-    fetch('/newBreath', { method: 'POST' }).catch(() => {});
+    // /startBreath arms the firmware — breaths NEVER begin without it
+    fetch('/startBreath', { method: 'POST' }).catch(() => {});
     resetRepCapture();
     setInhaleClass('good');
     $('coachMain').textContent = 'Inhale to begin';
@@ -1014,7 +1015,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   function exitFlow() {
     clearTimers();
     flow.active = false;
-    fetch('/newBreath', { method: 'POST' }).catch(() => {});  // leave firmware ready
+    fetch('/newBreath', { method: 'POST' }).catch(() => {});  // reset & disarm (standby)
     showView('home');
   }
 
