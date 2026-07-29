@@ -2,6 +2,11 @@
 // Smart Spirometer — ESP32 firmware
 // VL53L0X piston tracking + web app (headless — no OLED)
 //
+// STATE MACHINE (v5): the ToF sensor is sampled ONLY while a breath
+// session is active (Ready -> Breathing -> Hold). Setting a goal,
+// saving a profile, or finishing a breath leaves the sensor idle —
+// every breath starts with an explicit "Start breath" tap in the app.
+//
 // NETWORKING: Access Point ONLY. The device hosts its own WiFi
 // network and is reachable only through it — it never joins a home
 // or public network.
@@ -81,12 +86,34 @@ const unsigned long SAMPLE_INTERVAL_MS = 20;
 // ---- Reset requested from the web task (handled safely in loop()) ----
 volatile bool resetRequested = false;
 
-// ---- Explicit start (UX fix): a breath can only begin after the user
-// arms one via /startBreath (the app's "Start breathing" button).
-// It disarms when a session ends or is exited, so piston movement /
-// sensor jitter can never auto-start a breath. ----
+// ---- Explicit start: a breath session can only begin after the user
+// taps "Start breath" in the app (/startBreath). ----
 volatile bool startRequested = false;
-bool armed = false;
+
+// ================================================================
+// Device state machine
+// ================================================================
+// The ToF sensor is sampled ONLY while a breath session is active
+// (READY -> BREATHING -> HOLD). In IDLE and DONE the sensor is left
+// untouched: setting a goal, saving a profile, or finishing a breath
+// never starts sampling. Every session begins with an explicit
+// "Start breath" tap and ends back in DONE/IDLE, waiting for the
+// next explicit start.
+//
+//   ST_IDLE      standby — no sampling (boot, after New Breath/exit)
+//   ST_READY     armed by /startBreath — sampling, waiting for inhale
+//   ST_BREATHING inhale in progress — sampling
+//   ST_HOLD      breath captured — 5 s NON-BLOCKING hold countdown
+//   ST_DONE      results shown — no sampling; waits for next start
+//
+// NOTE: declared before any function definition (the Arduino IDE's
+// auto-prototype step chokes on custom types that appear later).
+enum DeviceState : uint8_t { ST_IDLE, ST_READY, ST_BREATHING, ST_HOLD, ST_DONE };
+DeviceState devState = ST_IDLE;
+
+// Non-blocking hold-phase bookkeeping
+unsigned long holdStartMillis = 0;
+int holdLastShown = -1;   // last countdown number printed to Serial
 
 // ================================================================
 // Profile & recovery tracking (Home-screen UI)
@@ -153,9 +180,8 @@ float lastVolume = 0;
 unsigned long lastTime = 0;
 
 // ---- Target & session state ----
-float targetVolume = -1;
+float targetVolume = -1;       // informational only — a session can start without it
 bool  targetReached = false;   // informational flag only — no longer ends the breath
-bool  sessionEnded  = false;   // freezes the loop once a result is shown
 
 // ---- Breath timing ----
 unsigned long breathStartTime = 0;
@@ -426,7 +452,7 @@ void broadcastState() {
   doc["volume"] = toMl(webVolume);
   doc["target"] = toMl(targetVolume);
   doc["flow"]   = toMl(webFlow);
-  doc["score"]  = toMl(sessionEnded ? sessionScore : peakVolume);
+  doc["score"]  = toMl((devState == ST_HOLD || devState == ST_DONE) ? sessionScore : peakVolume);
   doc["state"]  = webState;
   doc["mode"]   = "AP";
   doc["ip"]     = deviceIP;
@@ -491,22 +517,33 @@ bool initToFSensor() {
 // Session phases (previously OLED screens — now Serial + web state)
 // ================================================================
 
-// Hold phase: count down 5..1 while the app shows the locked-in score
-void holdCountdown(float score) {
-  webState = "Hold";
-  for (int n = HOLD_SECONDS; n >= 1; n--) {
+// Hold phase — NON-BLOCKING. beginHold() enters ST_HOLD; serviceHold()
+// runs from loop() each pass and returns true once the 5 s are up.
+// (The old blocking delay(1000) loop froze loop() — and every web-flag
+// handoff with it — for 5 s at the end of each breath.)
+void beginHold() {
+  devState        = ST_HOLD;
+  webState        = "Hold";
+  holdStartMillis = millis();
+  holdLastShown   = -1;
+  broadcastState();
+}
+
+bool serviceHold() {
+  unsigned long elapsed = millis() - holdStartMillis;
+  int n = HOLD_SECONDS - (int)(elapsed / 1000);
+  if (n >= 1 && n != holdLastShown) {
+    holdLastShown = n;
     Serial.print(">> Hold it! "); Serial.print(n);
-    Serial.print("  ("); Serial.print(toMl(score)); Serial.println(" mL)");
-    broadcastState();   // keep the phone in sync during the countdown
-    delay(1000);
+    Serial.print("  ("); Serial.print(toMl(sessionScore)); Serial.println(" mL)");
   }
+  return elapsed >= (unsigned long)HOLD_SECONDS * 1000UL;
 }
 
 // Results: goal vs score, encouragement, and flow next-step
 void showResultsScreen(float score, float goal) {
   setLed(false);
-  armed = false;          // next breath requires an explicit Start
-  sessionEnded = true;
+  devState = ST_DONE;     // sampling stops; next breath needs Start
   webState = "Done";
 
   bool hitGoal = (score >= goal);
@@ -523,8 +560,7 @@ void showResultsScreen(float score, float goal) {
 // Exhale (misuse): skips the hold/score entirely, just corrects them
 void showExhaleScreen() {
   setLed(false);
-  armed = false;          // next breath requires an explicit Start
-  sessionEnded = true;
+  devState = ST_DONE;     // sampling stops; next breath needs Start
   webState = "Done";
 
   Serial.println(">> Inhale only.");
@@ -539,7 +575,6 @@ void showExhaleScreen() {
 // to avoid two tasks touching the I2C bus / session state at once.
 void resetSession() {
   breathStarted   = false;
-  sessionEnded    = false;
   targetReached   = false;
   exhaleDetected  = false;
   peakVolume      = 0;
@@ -557,9 +592,7 @@ void resetSession() {
   webState  = "Idle";
 
   setLed(true);
-  Serial.println(">> Session reset — ready for a new breath.");
-  if (targetVolume > 0) Serial.println("Inhale to start...");
-  else                  Serial.println("Set target volume via Serial or web.");
+  Serial.println(">> Session reset.");
   broadcastState();
 }
 
@@ -625,7 +658,7 @@ void setup() {
       if (val > 0 && val <= 4000) {
         targetVolume = val;
         Serial.print("Target set via web to "); Serial.print(val, 0);
-        Serial.println(" mL. Inhale to start...");
+        Serial.println(" mL. (Goal only — tap Start breath to begin a session.)");
         request->send(200, "text/plain", "OK");
         return;
       }
@@ -661,23 +694,6 @@ void setup() {
     pendingRestart = request->hasParam("restart", true) &&
                      request->getParam("restart", true)->value() == "1";
     profilePending = true;
-    request->send(200, "text/plain", "OK");
-  });
-
-  // Post-session check-in from the app (Stage 6). No storage backend
-  // yet — logs the submitted fields to Serial and acknowledges.
-  server.on("/checkin", HTTP_POST, [](AsyncWebServerRequest *request) {
-    Serial.println(">> Post-session check-in received:");
-    int n = request->params();
-    for (int i = 0; i < n; i++) {
-      const AsyncWebParameter* p = request->getParam(i);
-      if (p->isPost()) {
-        Serial.print("   ");
-        Serial.print(p->name());
-        Serial.print(": ");
-        Serial.println(p->value());
-      }
-    }
     request->send(200, "text/plain", "OK");
   });
 
@@ -751,7 +767,8 @@ void setup() {
 
   setLed(true);
 
-  Serial.println("Enter target volume in mL (e.g. 2000):");
+  Serial.println("Standby. Tap 'Start breath' in the app to begin a session.");
+  Serial.println("(Optional) set a target volume over Serial, e.g. 2000.");
 }
 
 // ================================================================
@@ -759,21 +776,22 @@ void setup() {
 // ================================================================
 
 void loop() {
-  // ---- Web-requested reset (checked BEFORE the sessionEnded freeze,
+  // ---- Web-requested reset (checked BEFORE the state gates below,
   //      so "New Breath" works from the Done screen) ----
   if (resetRequested) {
     resetRequested = false;
-    armed = false;          // reset to standby — do NOT auto-start
+    devState = ST_IDLE;     // back to standby — sampling stays OFF
     resetSession();
   }
 
-  // ---- Web-requested start: reset, then arm breath detection ----
+  // ---- Web-requested start: reset, then arm breath detection.
+  //      This is the ONLY transition that turns sensor sampling on. ----
   if (startRequested) {
     startRequested = false;
     resetSession();
-    armed = true;
+    devState = ST_READY;
     webState = "Ready";     // armed, waiting for the inhale
-    Serial.println(">> Armed — inhale to begin.");
+    Serial.println(">> Session armed — inhale to begin.");
     broadcastState();
   }
 
@@ -800,25 +818,35 @@ void loop() {
     broadcastState();
   }
 
-  // ---- Wait for target volume (Serial or web — whichever comes first) ----
-  if (targetVolume < 0) {
-    if (Serial.available()) {
-      String input = Serial.readStringUntil('\n');
-      input.trim();
+  // ---- Optional Serial goal entry (standby only). Setting a goal
+  //      ONLY updates the goal value — it never starts sampling or a
+  //      session. ----
+  if (devState == ST_IDLE && Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    if (input.length() > 0) {
       float val = input.toFloat();
       if (val > 0 && val <= 4000) {
         targetVolume = val;
         Serial.print("Target set to "); Serial.print(targetVolume, 0);
-        Serial.println(" mL. Inhale to start...");
+        Serial.println(" mL. Tap 'Start breath' in the app to begin.");
       } else {
         Serial.println("Invalid. Enter a number between 1 and 4000:");
       }
     }
+  }
+
+  // ---- Standby / results: the ToF sensor is NOT sampled. Stay here
+  //      until the user explicitly starts the next breath. ----
+  if (devState == ST_IDLE || devState == ST_DONE) return;
+
+  // ---- Hold phase: non-blocking 5 s countdown, then the results ----
+  if (devState == ST_HOLD) {
+    if (serviceHold()) showResultsScreen(sessionScore, targetVolume);
     return;
   }
 
-  // ---- Session finished: freeze on the result until New Breath / reset ----
-  if (sessionEnded) return;
+  // ---- Active session (READY / BREATHING): sample the ToF sensor ----
 
   // ---- Non-blocking sample gate: aligns with the 20 ms timing budget ----
   if (millis() - lastSample < SAMPLE_INTERVAL_MS) return;
@@ -832,8 +860,9 @@ void loop() {
   if (rawDist >= 8190) return;
 
   // ---- Detect breath start (only when the user has armed one) ----
-  if (armed && !breathStarted && rawDist < BREATH_START_THRESHOLD) {
+  if (devState == ST_READY && !breathStarted && rawDist < BREATH_START_THRESHOLD) {
     breathStarted = true;
+    devState = ST_BREATHING;
     breathStartTime = millis();
     Serial.println(">> Breath started.");
   }
@@ -856,7 +885,7 @@ void loop() {
   if (!breathStarted) {
     webVolume = (volume < IDLE_DEADZONE_ML) ? 0 : volume;
     webFlow   = 0;
-    webState  = armed ? "Ready" : "Idle";
+    webState  = "Ready";
   } else {
     webVolume = volume;
     webFlow   = flow;
@@ -867,7 +896,7 @@ void loop() {
   if (breathStarted && volume > peakVolume) peakVolume = volume;
 
   // ---- Mark goal reached (flag only — does NOT end the breath) ----
-  if (!targetReached && peakVolume >= targetVolume) {
+  if (!targetReached && targetVolume > 0 && peakVolume >= targetVolume) {
     targetReached = true;
     Serial.println(">> Goal volume reached.");
   }
@@ -898,8 +927,7 @@ void loop() {
       webVolume    = sessionScore;
       recordBreathCompletion();   // counts toward today's goal, resets countdown
       Serial.print(">> Breath stopped at "); Serial.print(toMl(sessionScore)); Serial.println(" mL");
-      holdCountdown(sessionScore);
-      showResultsScreen(sessionScore, targetVolume);
+      beginHold();                // non-blocking — loop() keeps running
       return;
     }
   }
@@ -921,8 +949,7 @@ void loop() {
     sessionScore = peakVolume;
     webVolume    = sessionScore;
     recordBreathCompletion();   // counts toward today's goal, resets countdown
-    holdCountdown(sessionScore);
-    showResultsScreen(sessionScore, targetVolume);
+    beginHold();                // non-blocking — loop() keeps running
     return;
   }
 }

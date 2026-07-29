@@ -1,5 +1,12 @@
 // ================================================================
-// webpage.h — Smart Spirometer app UI  (v4)
+// webpage.h — Smart Spirometer app UI  (v5)
+//
+// v5 — manual-start state machine: goal setup never starts a session,
+// and after every breath (Inhale -> Hold -> Exhale) the app returns
+// to the Prepare screen and waits for the next explicit "Start
+// breath" tap. Auto-looping into the next rep and auto-entering the
+// flow on sensor movement were removed — the firmware now samples
+// the ToF sensor only while a session is active.
 //
 // v4 adds the 6-stage breathing exercise flow (replaces the old
 // Session view). Entered from the Next-session card or auto-entered
@@ -11,8 +18,8 @@
 //                             screen pulses + haptic stubs
 //   Stage 3  Hold           — full green circle, 5s countdown
 //                             (mirrors firmware HOLD_SECONDS)
-//   Stage 4  Reset & Exhale — shrink animation, auto /newBreath,
-//                             loops to Stage 2 for the next rep
+//   Stage 4  Reset & Exhale — shrink animation, then back to Stage 1
+//                             to await the next "Start breath" tap
 //   Stage 5  Summary        — breaths ring, stars, metric bars
 //                             (computed client-side from live data)
 //   Stage 6  Check-in       — survey -> POST /checkin
@@ -499,6 +506,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="stage" id="stage-prepare">
       <div class="stage-title">Let's get ready</div>
       <div class="stage-sub">Sit up tall and place the<br>mouthpiece in your mouth.</div>
+      <div class="stage-sub" id="prepProgress" style="font-weight:700;color:var(--blue);"></div>
 
       <div class="device-hero">
         <!-- Simplified mouthpiece illustration -->
@@ -530,7 +538,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </div>
       </div>
 
-      <button class="btn" onclick="startBreathing()">Start breathing</button>
+      <button class="btn" onclick="startBreathing()">Start breath</button>
+      <button class="end-link" onclick="endEarly()">End session</button>
     </div>
 
     <!-- ---- Stage 2: Inhale coaching ---- -->
@@ -987,6 +996,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     document.querySelectorAll('.stage').forEach(s => s.classList.remove('active'));
     $('stage-' + name).classList.add('active');
     window.scrollTo(0, 0);
+    if (name === 'prepare') {
+      $('prepProgress').textContent =
+        'Breath ' + Math.min(flow.reps.length + 1, flow.repsTarget) + ' of ' + flow.repsTarget +
+        (flow.reps.length > 0 ? ' — tap Start breath when ready' : '');
+    }
     if (name === 'summary') renderSummary();
   }
 
@@ -1130,14 +1144,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     c.style.transition = '';
     requestAnimationFrame(() => { c.style.transform = 'scale(0.3)'; });
 
-    // FIRMWARE HOOK: replace this timer with a real "piston returned
-    // to rest" event when the firmware exposes exhale detection.
+    // The firmware is already in DONE (sampling stopped). After the
+    // exhale animation, return the device to standby and bring the UI
+    // back to the ready screen — the next breath begins ONLY when the
+    // user taps "Start breath" again.
     clearTimers();
     flow.exhaleTimer = setTimeout(() => {
+      fetch('/newBreath', { method: 'POST' }).catch(() => {});  // DONE -> IDLE standby
       if (flow.reps.length >= flow.repsTarget) {
         gotoStage('summary');
       } else {
-        startBreathing();   // /newBreath + back to Stage 2
+        gotoStage('prepare');   // wait for an explicit "Start breath"
       }
     }, 3000);
   }
@@ -1528,17 +1545,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
 
       // ---- Exercise flow ----
-      if (!flow.active) {
-        // A breath started while outside the flow: jump straight in
-        if (d.state === 'Breathing') {
-          flow.active = true;
-          flow.reps = [];
-          resetRepCapture();
-          showView('session');
-          gotoStage('inhale');
-        }
-        return;
-      }
+      // Sessions start only from the app's own "Start breath" button —
+      // never from sensor movement or device state.
+      if (!flow.active) return;
 
       if (flow.stage === 'inhale') {
         handleInhale(d);
@@ -1569,7 +1578,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       body: 'value=' + encodeURIComponent(val)
     })
     .then(r => r.text().then(t => {
-      $('goalMsg').textContent = r.ok ? ('Goal set to ' + val + ' mL') : t;
+      $('goalMsg').textContent = r.ok
+        ? ('Goal set to ' + val + ' mL — tap Start breath when you’re ready')
+        : t;
     }))
     .catch(() => { $('goalMsg').textContent = 'Could not reach device'; });
   }
