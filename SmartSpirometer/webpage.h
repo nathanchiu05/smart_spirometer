@@ -1,5 +1,12 @@
 // ================================================================
-// webpage.h — Smart Spirometer app UI  (v5)
+// webpage.h — Smart Spirometer app UI  (v6)
+//
+// v6 — one breath per trip through the flow. A completed breath goes
+// straight to its own overview and check-in, then home, where the
+// daily ring shows the updated count (e.g. 1/10). The user starts each
+// subsequent breath manually from the home card. Progress is therefore
+// per-day (the firmware's bToday) rather than per-visit, and a history
+// record is one breath rather than a run of them.
 //
 // v5 — manual-start state machine: goal setup never starts a session,
 // and after every breath (Inhale -> Hold -> Exhale) the app returns
@@ -18,11 +25,11 @@
 //                             screen pulses + haptic stubs
 //   Stage 3  Hold           — full green circle, 5s countdown
 //                             (mirrors firmware HOLD_SECONDS)
-//   Stage 4  Reset & Exhale — shrink animation, then back to Stage 1
-//                             to await the next "Start breath" tap
-//   Stage 5  Summary        — breaths ring, stars, metric bars
-//                             (computed client-side from live data)
-//   Stage 6  Check-in       — survey -> POST /checkin
+//   Stage 4  Reset & Exhale — shrink animation, then on to Stage 5
+//   Stage 5  Breath overview— daily-progress ring, stars, metric bars
+//                             for that one breath (computed client-side
+//                             from live data) -> POST /session
+//   Stage 6  Check-in       — survey -> POST /checkin, then home
 //
 // UI-first notes (firmware catch-up hooks):
 //   - Stage 4 advance is timer-based; swap to a real "piston returned
@@ -478,7 +485,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
       </div>
       <div class="grow">
-        <h3>Next session</h3>
+        <h3>Start next breath</h3>
         <div class="value" id="nextSession">&mdash;</div>
       </div>
       <div class="chev">
@@ -551,7 +558,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       </div>
 
       <button class="btn" onclick="startBreathing()">Start breath</button>
-      <button class="end-link" onclick="endEarly()">End session</button>
+      <button class="end-link" onclick="endEarly()">End breath</button>
     </div>
 
     <!-- ---- Stage 2: Inhale coaching ---- -->
@@ -580,7 +587,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </div>
       </div>
 
-      <button class="end-link" onclick="endEarly()">End session</button>
+      <button class="end-link" onclick="endEarly()">End breath</button>
     </div>
 
     <!-- ---- Stage 3: Hold ---- -->
@@ -634,13 +641,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </div>
       </div>
 
-      <button class="end-link" onclick="endEarly()">End session</button>
+      <button class="end-link" onclick="endEarly()">End breath</button>
     </div>
 
     <!-- ---- Stage 5: Summary ---- -->
     <div class="stage" id="stage-summary">
-      <div class="stage-title">Session summary</div>
-      <div class="stage-sub">Great work today!</div>
+      <div class="stage-title">Breath overview</div>
+      <div class="stage-sub">Nice work — here's how that breath went.</div>
 
       <div class="sum-ring">
         <svg width="190" height="190" viewBox="0 0 190 190">
@@ -650,7 +657,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </svg>
         <div class="inner">
           <div class="big" id="sumBreaths">0 / 10</div>
-          <div class="lab">breaths</div>
+          <div class="lab">breaths today</div>
         </div>
       </div>
 
@@ -659,17 +666,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
       <div class="card" style="padding: 8px 18px;">
         <div class="metric-row"><span class="name">Consistency</span><span class="segs" id="mConsist"></span><span class="num" id="mConsistV">&mdash;</span></div>
-        <div class="metric-row"><span class="name">Duration (avg)</span><span class="segs" id="mDur"></span><span class="num" id="mDurV">&mdash;</span></div>
-        <div class="metric-row"><span class="name">Peak Flow (avg)</span><span class="segs" id="mPeak"></span><span class="num" id="mPeakV">&mdash;</span></div>
-        <div class="metric-row"><span class="name">Volume (avg)</span><span class="segs" id="mVol"></span><span class="num" id="mVolV">&mdash;</span></div>
+        <div class="metric-row"><span class="name">Duration</span><span class="segs" id="mDur"></span><span class="num" id="mDurV">&mdash;</span></div>
+        <div class="metric-row"><span class="name">Peak Flow</span><span class="segs" id="mPeak"></span><span class="num" id="mPeakV">&mdash;</span></div>
+        <div class="metric-row"><span class="name">Volume</span><span class="segs" id="mVol"></span><span class="num" id="mVolV">&mdash;</span></div>
       </div>
 
-      <button class="btn" onclick="gotoStage('checkin')">Done</button>
+      <button class="btn" onclick="gotoStage('checkin')">Continue to check-in</button>
     </div>
 
     <!-- ---- Stage 6: Check-in ---- -->
     <div class="stage" id="stage-checkin">
-      <div class="stage-title" style="font-size:1.25em;">How did that session feel?</div>
+      <div class="stage-title" style="font-size:1.25em;">How did that breath feel?</div>
       <div class="stage-sub">Your feedback helps us personalize your care.</div>
 
       <!-- Sliders -->
@@ -996,7 +1003,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   const flow = {
     active: false,
     stage: 'prepare',
-    repsTarget: 10,
+    repsTarget: 10,             // daily breath goal (mirrors d.bGoal)
+    todayDone: 0,               // breaths completed today (mirrors d.bToday)
+    volTarget: 0,               // per-breath volume target, mL (mirrors d.target)
     reps: [],                    // per-rep stats {dur, peak, vol, consist}
     breathStartTs: 0,
     samples: [],                 // {t, flow} during inhale
@@ -1008,15 +1017,22 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     exhaleTimer: null
   };
 
+  // Progress is now per-day, not per-visit: one breath is one trip through
+  // the flow, so the device's running count is the only meaningful tally.
+  function progressText() {
+    return Math.min(flow.todayDone, flow.repsTarget) + ' of ' + flow.repsTarget;
+  }
+
   function gotoStage(name) {
     flow.stage = name;
     document.querySelectorAll('.stage').forEach(s => s.classList.remove('active'));
     $('stage-' + name).classList.add('active');
     window.scrollTo(0, 0);
     if (name === 'prepare') {
+      const next = Math.min(flow.todayDone + 1, flow.repsTarget);
       $('prepProgress').textContent =
-        'Breath ' + Math.min(flow.reps.length + 1, flow.repsTarget) + ' of ' + flow.repsTarget +
-        (flow.reps.length > 0 ? ' — tap Start breath when ready' : '');
+        'Breath ' + next + ' of ' + flow.repsTarget +
+        (flow.todayDone > 0 ? ' — tap Start breath when ready' : '');
     }
     if (name === 'summary') renderSummary();
     if (name === 'checkin') resetCheckin();
@@ -1151,7 +1167,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       consist: post.length ? good / post.length : 1
     });
 
-    $('repCounter').textContent = flow.reps.length + ' of ' + flow.repsTarget;
+    $('repCounter').textContent = progressText();
     gotoStage('exhale');
 
     // Shrink animation
@@ -1163,17 +1179,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     requestAnimationFrame(() => { c.style.transform = 'scale(0.3)'; });
 
     // The firmware is already in DONE (sampling stopped). After the
-    // exhale animation, return the device to standby and bring the UI
-    // back to the ready screen — the next breath begins ONLY when the
-    // user taps "Start breath" again.
+    // exhale animation, return the device to standby and show this
+    // breath's overview — one breath is one trip through the flow, so
+    // the run always ends here rather than looping to the next rep.
     clearTimers();
     flow.exhaleTimer = setTimeout(() => {
       fetch('/newBreath', { method: 'POST' }).catch(() => {});  // DONE -> IDLE standby
-      if (flow.reps.length >= flow.repsTarget) {
-        gotoStage('summary');
-      } else {
-        gotoStage('prepare');   // wait for an explicit "Start breath"
-      }
+      gotoStage('summary');
     }, 3000);
   }
 
@@ -1189,15 +1201,20 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   function renderSummary() {
-    const n = flow.reps.length, N = flow.repsTarget;
-    $('sumBreaths').textContent = n + ' / ' + N;
-    $('sumRing').style.strokeDashoffset = SUM_C * (1 - Math.min(1, n / N));
+    const rep = flow.reps[flow.reps.length - 1];
+    if (!rep) return;
 
-    const avg = (fn) => n ? flow.reps.reduce((a, r) => a + fn(r), 0) / n : 0;
-    const consist = avg(r => r.consist);
-    const dur     = avg(r => r.dur);
-    const peak    = avg(r => r.peak) / 1000;   // mL/s -> L/s
-    const vol     = avg(r => r.vol)  / 1000;   // mL -> L
+    // The ring tracks the daily goal, not this visit: the device has
+    // already counted this breath, so it reads e.g. 1 / 10 on the way home.
+    const N = flow.repsTarget;
+    const done = Math.min(flow.todayDone, N);
+    $('sumBreaths').textContent = done + ' / ' + N;
+    $('sumRing').style.strokeDashoffset = SUM_C * (1 - (N > 0 ? Math.min(1, done / N) : 0));
+
+    const consist = rep.consist;
+    const dur     = rep.dur;
+    const peak    = rep.peak / 1000;           // mL/s -> L/s
+    const vol     = rep.vol  / 1000;           // mL -> L
 
     segsInto($('mConsist'), consist, 'g');
     segsInto($('mDur'),  dur / 6,   'b');      // 6s span for the bar scale
@@ -1208,30 +1225,35 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     $('mPeakV').textContent = peak.toFixed(2) + ' L/s';
     $('mVolV').textContent  = vol.toFixed(2) + ' L';
 
-    // Stars: completion + consistency, equally weighted
-    const score = n ? (0.5 * n / N + 0.5 * consist) : 0;
+    // Stars rate THIS breath: how steady it was and how close it came to
+    // the volume target. Completion count no longer applies — a single
+    // breath would otherwise always score 1/10 of the daily goal.
+    const volFrac = flow.volTarget > 0 ? Math.min(1, rep.vol / flow.volTarget) : consist;
+    const score = 0.5 * consist + 0.5 * volFrac;
     const starsN = Math.max(1, Math.round(score * 5));
     const starSvg = '<svg viewBox="0 0 24 24" fill="#f2b53d"><path d="M12 2.5l2.9 6 6.6 0.9-4.8 4.6 1.2 6.5L12 17.4l-5.9 3.1 1.2-6.5L2.5 9.4l6.6-0.9z"/></svg>';
     $('stars').innerHTML = Array.from({length: 5}, (_, i) =>
       '<span class="' + (i < starsN ? '' : 'off') + '">' + starSvg + '</span>').join('');
     $('starsLabel').textContent =
-      starsN === 5 ? 'Perfect session!' :
-      starsN >= 4 ? 'Great session!' :
-      starsN >= 3 ? 'Good session!' : 'Session complete';
+      starsN === 5 ? 'Perfect breath!' :
+      starsN >= 4 ? 'Great breath!' :
+      starsN >= 3 ? 'Good breath!' : 'Breath complete';
 
-    // Persist the session record to the device (once per session)
-    if (!flow.sessionSaved && n > 0) {
+    // Persist this breath to the device (once per trip through the flow).
+    // Each record is now a single breath, which is what the check-in
+    // attaches to and what the trends page sums per day.
+    if (!flow.sessionSaved) {
       flow.sessionSaved = true;
       const outcome = consist >= 0.85 ? 'Perfect'
                     : flow.cntFast >= flow.cntSlow ? 'Too fast' : 'Too slow';
       const body =
         'epoch='    + Math.floor(Date.now() / 1000) +
-        '&n='       + n + '&N=' + N +
+        '&n=1&N='   + N +
         '&outcome=' + encodeURIComponent(outcome) +
         '&consist=' + Math.round(consist * 100) +
-        '&vol='     + Math.round(avg(r => r.vol)) +
+        '&vol='     + Math.round(rep.vol) +
         '&dur='     + dur.toFixed(1) +
-        '&peak='    + Math.round(avg(r => r.peak));
+        '&peak='    + Math.round(rep.peak);
       fetch('/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1286,8 +1308,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       const hasSession = r.n !== undefined;
       const chipCls = hasSession ? (OUTCOME_CHIP[r.o] || 'none') : 'none';
       const chipTxt = hasSession ? (r.o || '\u2014') : 'Check-in only';
+      // Records are one breath each now; older multi-breath ones still render.
       const meta = hasSession
-        ? r.n + ' of ' + r.N + ' breaths \u00b7 ' + ((r.v || 0) / 1000).toFixed(2) + ' L avg'
+        ? (r.n === 1 ? '1 breath \u00b7 ' + ((r.v || 0) / 1000).toFixed(2) + ' L'
+                     : r.n + ' of ' + r.N + ' breaths \u00b7 ' + ((r.v || 0) / 1000).toFixed(2) + ' L avg')
         : 'Survey response';
       const stats = hasSession
         ? '<div class="hist-stats">' +
@@ -1549,11 +1573,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   setGreeting();
   setInterval(setGreeting, 60000);
 
+  // The countdown is a suggestion, not a gate — the card starts a breath
+  // whenever it is tapped.
   function fmtNext(s) {
-    if (s < 0)   return 'Ready when you are';
-    if (s === 0) return 'Due now';
+    if (s <= 0)  return 'Ready when you are';
     const h = Math.floor(s / 3600), m = Math.ceil((s % 3600) / 60);
-    return 'In ' + (h > 0 ? h + 'h ' + m + 'm' : m + 'm');
+    return 'Ready now · next due in ' + (h > 0 ? h + 'h ' + m + 'm' : m + 'm');
   }
 
   // ================================================================
@@ -1577,6 +1602,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       $('greetName').textContent = d.name;
       $('bToday').textContent = d.bToday;
       $('bGoal').textContent  = d.bGoal;
+      flow.todayDone = d.bToday;
+      if (d.target > 0) flow.volTarget = d.target;
       const frac = d.bGoal > 0 ? Math.min(1, d.bToday / d.bGoal) : 0;
       $('ringFill').style.strokeDashoffset = RING_C * (1 - frac);
       $('nextSession').textContent = fmtNext(d.nextS);
