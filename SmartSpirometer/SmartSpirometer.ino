@@ -158,7 +158,7 @@ char pendingCheckinBuf[768] = "";
 // Calibration & signal processing
 // ================================================================
 
-float D_EMPTY = 187.0;   // distance (mm) when piston rests at 0 mL
+float D_EMPTY = 180.0;   // distance (mm) when piston rests at 0 mL
 float D_FULL  = 42.0;    // distance (mm) when piston is at 4000 mL
 
 // ---- Idle deadzone: readings below this (pre-breath) display as 0 ----
@@ -186,14 +186,14 @@ bool  targetReached = false;   // informational flag only — no longer ends the
 // ---- Breath timing ----
 unsigned long breathStartTime = 0;
 bool  breathStarted = false;
-const float BREATH_START_THRESHOLD = 179.0;  // piston distance (mm) that signals start
+const float BREATH_START_THRESHOLD = 170.0;  // piston distance (mm) that signals start
 const float BREATH_TIMEOUT_S       = 15.0;   // safety stop if breath runs too long
 const float BREATH_WARN_S          = 12.0;   // "almost there" warning kicks in
 
 // ---- Flow classification thresholds (mL/s, from real device logs) ----
-const float FLOW_TOO_SLOW   = 250.0;
+const float FLOW_TOO_SLOW   = 200.0;
 const float FLOW_TOO_FAST   = 700.0;
-const float FLOW_EXHALE_NEG = -100.0;  // strong negative = exhale (misuse)
+// const float FLOW_EXHALE_NEG = -100.0;  // strong negative = exhale (misuse)
 const float FLOW_RAMP_SKIP  = 1.0;     // ignore the first second (ramp-up noise)
 
 // ---- Flow accumulation for classification (post ramp-up, positive only) ----
@@ -265,7 +265,7 @@ String classifyFlow() {
 
 // Real-time hint shown on the bottom line during the breath
 String liveHint(float flow, float elapsed) {
-  if (flow < FLOW_EXHALE_NEG)            return "Do not exhale!";
+  // if (flow < FLOW_EXHALE_NEG)            return "Do not exhale!";
   if (elapsed >= BREATH_WARN_S)          return "Almost there!";
   if (elapsed <  FLOW_RAMP_SKIP)         return "Keep going";
   if (flow > FLOW_TOO_FAST)              return "Slow down!";
@@ -741,14 +741,14 @@ void setup() {
     doc["dry"]    = P("dryMouth");
     doc["cough"]  = P("cough");
     if (P("cough") == "Yes") {
-      doc["mucus"] = P("mucus");
-      if (P("mucus") == "Yes") {
-        doc["colour"] = P("mucusColour");
-        doc["thick"]  = P("thickness");
-        doc["amt"]    = P("amount");
-      }
       doc["clear"] = P("coughClear");
       doc["hard"]  = P("coughHard");
+    }
+    doc["mucus"] = P("mucus");
+    if (P("mucus") == "Yes") {
+      doc["colour"] = P("mucusColour");
+      doc["thick"]  = P("thickness");
+      doc["amt"]    = P("amount");
     }
     if (P("notes").length() > 0) doc["notes"] = P("notes");
     serializeJson(doc, pendingCheckinBuf, sizeof(pendingCheckinBuf));

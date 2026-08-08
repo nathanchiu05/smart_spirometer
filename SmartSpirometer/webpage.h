@@ -69,8 +69,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     --radius: 16px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; }
+  html { height: 100%; }
   body {
+    /* min-height, not height: a fixed 100% leaves the bottom padding inside
+       the viewport box, so long views scroll their last control under the
+       fixed bottom nav instead of clearing it. */
+    min-height: 100%;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--bg);
     color: var(--navy);
@@ -148,9 +152,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   /* ---------- Stage 1: Prepare ---------- */
   .device-hero {
-    width: 210px; height: 210px; border-radius: 50%;
+    width: 140px; height: 140px; border-radius: 50%;
     background: radial-gradient(circle at 35% 30%, #eaf2ff, #d7e6fb);
-    margin: 26px auto 10px;
+    margin: 14px auto 8px;
     display: flex; align-items: center; justify-content: center;
     box-shadow: var(--shadow);
   }
@@ -295,16 +299,21 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .range-ends { display: flex; justify-content: space-between; font-size: 0.7em; color: var(--muted); margin-top: 2px; }
   .seg-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   .seg-btn {
-    flex: 1; min-width: 64px;
+    /* basis auto (not 0) so a long label wraps the row instead of
+       overflowing a button squeezed to an equal share of the width */
+    flex: 1 1 auto; min-width: 64px;
     border: 1px solid #dde4ee; background: #fbfcfe; color: var(--navy);
     border-radius: 999px; padding: 8px 10px; font-size: 0.82em; font-weight: 600;
     cursor: pointer; white-space: nowrap;
   }
+  /* Paired half-width groups (Thickness / Amount) need to fit 3 chips */
+  .seg-row.compact { gap: 6px; }
+  .seg-row.compact .seg-btn { min-width: 0; padding: 8px 4px; font-size: 0.75em; }
   .seg-btn.sel { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); }
   .ci-q { font-weight: 700; font-size: 0.88em; margin-top: 14px; }
   .hidden { display: none !important; }
   .dots-row { display: flex; justify-content: space-between; margin-top: 10px; }
-  .dot-opt { display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; width: 13%; }
+  .dot-opt { display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; width: 15%; }
   .dot-opt .dot { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #dde4ee; }
   .dot-opt.sel .dot { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
   .dot-opt .dl { font-size: 0.6em; color: var(--muted); text-align: center; line-height: 1.2; }
@@ -418,16 +427,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <div id="pulse"></div>
 
-  <!-- Top header -->
-  <div class="top-bar">
-    <button class="icon-btn" aria-label="Menu">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-    </button>
-    <div class="conn-dot" id="conn">Connecting</div>
-    <button class="icon-btn" aria-label="Notifications">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
-    </button>
-  </div>
+  // <!-- Top header -->
+  // <div class="top-bar">
+  //   <button class="icon-btn" aria-label="Menu">
+  //     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  //   </button>
+  //   <div class="conn-dot" id="conn">Connecting</div>
+  //   <button class="icon-btn" aria-label="Notifications">
+  //     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+  //   </button>
+  // </div>
 
   <!-- ================= HOME ================= -->
   <div class="view active" id="view-home">
@@ -509,14 +518,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <div class="stage-sub" id="prepProgress" style="font-weight:700;color:var(--blue);"></div>
 
       <div class="device-hero">
-        <!-- Simplified mouthpiece illustration -->
-        <svg width="150" height="150" viewBox="0 0 120 120">
-          <ellipse cx="34" cy="46" rx="14" ry="18" fill="#eef4fd" stroke="#c6d8f2" stroke-width="2" transform="rotate(-35 34 46)"/>
-          <rect x="38" y="42" width="26" height="20" rx="6" fill="#5a95e8" transform="rotate(-35 51 52)"/>
-          <rect x="50" y="50" width="34" height="24" rx="7" fill="#3f7fe0" transform="rotate(-35 67 62)"/>
-          <rect x="70" y="62" width="30" height="26" rx="8" fill="#2f6bed" transform="rotate(-35 85 75)"/>
-          <ellipse cx="92" cy="83" rx="7" ry="9" fill="#16244c" opacity="0.35" transform="rotate(-35 92 83)"/>
-          <rect x="60" y="52" width="10" height="4" rx="2" fill="#9cc0f2" transform="rotate(-35 65 54)"/>
+        <svg width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="#2f6bed" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <!-- Clipboard Outline -->
+          <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+          <!-- Top Clip -->
+          <rect x="8" y="2" width="8" height="4" rx="1" ry="1" fill="#e8efff"/>
+          <!-- Checklist Lines & Checkmarks -->
+          <path d="m9 10 1 1 2-2" stroke="#34b678" stroke-width="2"/>
+          <line x1="14" y1="10" x2="17" y2="10"/>
+          <path d="m9 14 1 1 2-2" stroke="#34b678" stroke-width="2"/>
+          <line x1="14" y1="14" x2="17" y2="14"/>
+          <line x1="9" y1="18" x2="17" y2="18"/>
         </svg>
       </div>
 
@@ -664,31 +676,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <div class="ci-card">
         <div class="ci-head">
           <span class="ci-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="2.5"/><path d="M12 8v6m0 0-3.5 6M12 14l3.5 6M7 10.5 12 9l5 1.5"/></svg></span>
-          <span><span class="t">Pain</span><br><span class="s" id="painLabel">No pain</span></span>
+          <span><span class="t">Pain</span><br><span class="s" id="painLabel">Minimal pain</span></span>
         </div>
-        <div class="ticks"><span>0</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10</span></div>
-        <input type="range" id="ciPain" min="0" max="10" value="0" oninput="sliderLabel('Pain')">
-        <div class="range-ends"><span>None</span><span>Severe pain</span></div>
+        <div class="ticks"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span></div>
+        <input type="range" id="ciPain" min="1" max="10" value="1" oninput="sliderLabel('Pain')">
+        <div class="range-ends"><span>Minimal</span><span>Severe pain</span></div>
       </div>
 
       <div class="ci-card">
         <div class="ci-head">
           <span class="ci-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg></span>
-          <span><span class="t">Tiredness</span><br><span class="s" id="tiredLabel">Not tired</span></span>
+          <span><span class="t">Tiredness</span><br><span class="s" id="tiredLabel">Barely tired</span></span>
         </div>
-        <div class="ticks"><span>0</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10</span></div>
-        <input type="range" id="ciTired" min="0" max="10" value="0" oninput="sliderLabel('Tired')">
-        <div class="range-ends"><span>None</span><span>Very tired</span></div>
+        <div class="ticks"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span></div>
+        <input type="range" id="ciTired" min="1" max="10" value="1" oninput="sliderLabel('Tired')">
+        <div class="range-ends"><span>Minimal</span><span>Very tired</span></div>
       </div>
 
       <div class="ci-card">
         <div class="ci-head">
           <span class="ci-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v7"/><path d="M12 10c0 3-1.5 4.5-3.5 6-1.6 1.2-4 1.3-4.9-.2C2.6 14 3 10.5 4.5 8.5 5.7 6.9 8 6.6 9 8.2"/><path d="M12 10c0 3 1.5 4.5 3.5 6 1.6 1.2 4 1.3 4.9-.2 1-1.8.6-5.3-.9-7.3-1.2-1.6-3.5-1.9-4.5-.3"/></svg></span>
-          <span><span class="t">Chest Tightness</span><br><span class="s" id="chestLabel">None</span></span>
+          <span><span class="t">Chest Tightness</span><br><span class="s" id="chestLabel">Minimal</span></span>
         </div>
-        <div class="ticks"><span>0</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10</span></div>
-        <input type="range" id="ciChest" min="0" max="10" value="0" oninput="sliderLabel('Chest')">
-        <div class="range-ends"><span>None</span><span>Severe</span></div>
+        <div class="ticks"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span></div>
+        <input type="range" id="ciChest" min="1" max="10" value="1" oninput="sliderLabel('Chest')">
+        <div class="range-ends"><span>Minimal</span><span>Severe</span></div>
       </div>
 
       <!-- Dry mouth -->
@@ -700,7 +712,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <div class="seg-row" data-group="dryMouth">
           <button class="seg-btn sel" onclick="segSel(this)">None</button>
           <button class="seg-btn" onclick="segSel(this)">Mild</button>
-          <button class="seg-btn" onclick="segSel(this)">Moderate</button>
           <button class="seg-btn" onclick="segSel(this)">Severe</button>
         </div>
       </div>
@@ -717,44 +728,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         </div>
 
         <div id="coughSection" class="hidden">
-          <div class="ci-q">Was mucus present?</div>
-          <div class="seg-row" data-group="mucus">
-            <button class="seg-btn sel" onclick="segSel(this); mucusToggle(false)">No</button>
-            <button class="seg-btn" onclick="segSel(this); mucusToggle(true)">Yes</button>
-          </div>
-
-          <div id="mucusSection" class="hidden">
-            <div class="ci-q">Mucus colour</div>
-            <div class="dots-row" data-group="mucusColour">
-              <div class="dot-opt sel" data-val="Clear" onclick="dotSel(this)"><span class="dot" style="background:#fff;"></span><span class="dl">Clear</span></div>
-              <div class="dot-opt" data-val="White" onclick="dotSel(this)"><span class="dot" style="background:#e9e9e9;"></span><span class="dl">White</span></div>
-              <div class="dot-opt" data-val="Yellow" onclick="dotSel(this)"><span class="dot" style="background:#f2c94c;"></span><span class="dl">Yellow</span></div>
-              <div class="dot-opt" data-val="Yellow-Green" onclick="dotSel(this)"><span class="dot" style="background:#a8c65a;"></span><span class="dl">Yellow-Green</span></div>
-              <div class="dot-opt" data-val="Brown" onclick="dotSel(this)"><span class="dot" style="background:#9a6b3f;"></span><span class="dl">Brown</span></div>
-              <div class="dot-opt" data-val="Blood-Tinged" onclick="dotSel(this)"><span class="dot" style="background:#d4646a;"></span><span class="dl">Blood-Tinged</span></div>
-              <div class="dot-opt" data-val="Bloody" onclick="dotSel(this)"><span class="dot" style="background:#b02525;"></span><span class="dl">Bloody</span></div>
-            </div>
-
-            <div class="row" style="gap:14px;">
-              <div style="flex:1;">
-                <div class="ci-q">Thickness</div>
-                <div class="seg-row" data-group="thickness">
-                  <button class="seg-btn" onclick="segSel(this)">Thin</button>
-                  <button class="seg-btn sel" onclick="segSel(this)">Moderate</button>
-                  <button class="seg-btn" onclick="segSel(this)">Thick</button>
-                </div>
-              </div>
-              <div style="flex:1;">
-                <div class="ci-q">Amount</div>
-                <div class="seg-row" data-group="amount">
-                  <button class="seg-btn" onclick="segSel(this)">Small</button>
-                  <button class="seg-btn sel" onclick="segSel(this)">Moderate</button>
-                  <button class="seg-btn" onclick="segSel(this)">Large</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div class="ci-q">Did coughing help clear your chest?</div>
           <div class="seg-row" data-group="coughClear">
             <button class="seg-btn" onclick="segSel(this)">Yes, I feel clearer</button>
@@ -768,6 +741,49 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             <button class="seg-btn sel" onclick="segSel(this)">No</button>
             <button class="seg-btn" onclick="segSel(this)">Somewhat</button>
             <button class="seg-btn" onclick="segSel(this)">Yes</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mucus -->
+      <div class="ci-card">
+        <div class="ci-head">
+          <span class="ci-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5s4 4.7 4 7.4a4 4 0 0 1-8 0c0-2.7 4-7.4 4-7.4z"/><path d="M17 12.5s3 3.5 3 5.4a3 3 0 0 1-6 0c0-1.9 3-5.4 3-5.4z"/></svg></span>
+          <span><span class="t">Was mucus present?</span></span>
+        </div>
+        <div class="seg-row" data-group="mucus">
+          <button class="seg-btn sel" onclick="segSel(this); mucusToggle(false)">No</button>
+          <button class="seg-btn" onclick="segSel(this); mucusToggle(true)">Yes</button>
+        </div>
+
+        <div id="mucusSection" class="hidden">
+          <div class="ci-q">Mucus colour</div>
+          <div class="dots-row" data-group="mucusColour">
+            <div class="dot-opt sel" data-val="Clear" onclick="dotSel(this)"><span class="dot" style="background:#fff;"></span><span class="dl">Clear</span></div>
+            <div class="dot-opt" data-val="White" onclick="dotSel(this)"><span class="dot" style="background:#e9e9e9;"></span><span class="dl">White</span></div>
+            <div class="dot-opt" data-val="Yellow" onclick="dotSel(this)"><span class="dot" style="background:#f2c94c;"></span><span class="dl">Yellow</span></div>
+            <div class="dot-opt" data-val="Green" onclick="dotSel(this)"><span class="dot" style="background:#6aa84f;"></span><span class="dl">Green</span></div>
+            <div class="dot-opt" data-val="Brown" onclick="dotSel(this)"><span class="dot" style="background:#9a6b3f;"></span><span class="dl">Brown</span></div>
+            <div class="dot-opt" data-val="Bloody" onclick="dotSel(this)"><span class="dot" style="background:#b02525;"></span><span class="dl">Bloody</span></div>
+          </div>
+
+          <div class="row" style="gap:14px;">
+            <div style="flex:1;">
+              <div class="ci-q">Thickness</div>
+              <div class="seg-row compact" data-group="thickness">
+                <button class="seg-btn" onclick="segSel(this)">Thin</button>
+                <button class="seg-btn sel" onclick="segSel(this)">Moderate</button>
+                <button class="seg-btn" onclick="segSel(this)">Thick</button>
+              </div>
+            </div>
+            <div style="flex:1;">
+              <div class="ci-q">Amount</div>
+              <div class="seg-row compact" data-group="amount">
+                <button class="seg-btn" onclick="segSel(this)">Small</button>
+                <button class="seg-btn sel" onclick="segSel(this)">Moderate</button>
+                <button class="seg-btn" onclick="segSel(this)">Large</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -787,7 +803,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         If you have severe symptoms or are concerned, please contact your care team.
       </div>
 
-      <button class="btn" onclick="saveCheckin()">Save check-in</button>
+      <button class="btn" onclick="saveCheckin()">Save Check-In</button>
+      <button class="btn ghost" style="margin-top:10px;" onclick="skipCheckin()">Skip</button>
       <div class="form-msg" id="checkinMsg" style="text-align:center;"></div>
     </div>
   </div>
@@ -1002,6 +1019,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         (flow.reps.length > 0 ? ' — tap Start breath when ready' : '');
     }
     if (name === 'summary') renderSummary();
+    if (name === 'checkin') resetCheckin();
   }
 
   function enterFlow() {
@@ -1243,15 +1261,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     out.push('<span><b>Chest</b> ' + esc(ci.chest) + '/10</span>');
     if (ci.dry)   out.push('<span><b>Dry mouth</b> ' + esc(ci.dry) + '</span>');
     if (ci.cough) out.push('<span><b>Cough</b> ' + esc(ci.cough) + '</span>');
+    if (ci.clear) out.push('<span><b>Chest cleared</b> ' + esc(ci.clear) + '</span>');
+    if (ci.hard)  out.push('<span><b>Coughing difficult</b> ' + esc(ci.hard) + '</span>');
     if (ci.mucus === 'Yes') {
       let m = 'Yes';
       if (ci.colour) m += ', ' + ci.colour;
       if (ci.thick)  m += ', ' + ci.thick.toLowerCase();
       if (ci.amt)    m += ', ' + ci.amt.toLowerCase() + ' amount';
       out.push('<span><b>Mucus</b> ' + esc(m) + '</span>');
+    } else if (ci.mucus) {
+      out.push('<span><b>Mucus</b> ' + esc(ci.mucus) + '</span>');
     }
-    if (ci.clear) out.push('<span><b>Chest cleared</b> ' + esc(ci.clear) + '</span>');
-    if (ci.hard)  out.push('<span><b>Coughing difficult</b> ' + esc(ci.hard) + '</span>');
     return out.join('');
   }
 
@@ -1420,16 +1440,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   // ---------------- Stage 6: check-in ----------------
   const SLIDER_WORDS = {
-    Pain:  ['No pain', 'Mild pain', 'Moderate pain', 'Severe pain'],
-    Tired: ['Not tired', 'A little tired', 'Quite tired', 'Very tired'],
-    Chest: ['None', 'Mild', 'Moderate', 'Severe']
+    Pain:  ['Minimal pain', 'Mild pain', 'Moderate pain', 'Severe pain'],
+    Tired: ['Barely tired', 'A little tired', 'Quite tired', 'Very tired'],
+    Chest: ['Minimal', 'Mild', 'Moderate', 'Severe']
   };
   const SLIDER_LABEL_EL = { Pain: 'painLabel', Tired: 'tiredLabel', Chest: 'chestLabel' };
   const SLIDER_INPUT_EL = { Pain: 'ciPain', Tired: 'ciTired', Chest: 'ciChest' };
+  // Sliders run 1-10, so the four words split the range into quarters.
   function sliderLabel(which) {
     const v = +$(SLIDER_INPUT_EL[which]).value;
     const w = SLIDER_WORDS[which];
-    $(SLIDER_LABEL_EL[which]).textContent = v === 0 ? w[0] : v <= 3 ? w[1] : v <= 6 ? w[2] : w[3];
+    $(SLIDER_LABEL_EL[which]).textContent = v <= 2 ? w[0] : v <= 5 ? w[1] : v <= 8 ? w[2] : w[3];
   }
 
   function segSel(btn) {
@@ -1449,9 +1470,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     return sel ? (sel.dataset.val || sel.textContent.trim()) : '';
   }
 
+  // Defaults are read from the markup once, so resetCheckin() can restore
+  // them after a session without duplicating the option list here.
+  const CI_DEFAULTS = {};
+  document.querySelectorAll('#stage-checkin [data-group]').forEach(g => {
+    const sel = g.querySelector('.sel');
+    CI_DEFAULTS[g.dataset.group] = sel ? (sel.dataset.val || sel.textContent.trim()) : null;
+  });
+
+  function resetCheckin() {
+    ['Pain', 'Tired', 'Chest'].forEach(k => {
+      $(SLIDER_INPUT_EL[k]).value = 1;
+      sliderLabel(k);
+    });
+    document.querySelectorAll('#stage-checkin [data-group]').forEach(g => {
+      const want = CI_DEFAULTS[g.dataset.group];
+      g.querySelectorAll('.seg-btn, .dot-opt').forEach(o => {
+        const v = o.dataset.val || o.textContent.trim();
+        o.classList.toggle('sel', want !== null && v === want);
+      });
+    });
+    coughToggle(false);
+    mucusToggle(false);
+    $('ciNotes').value = '';
+    notesCount();
+    $('checkinMsg').textContent = '';
+  }
+
+  function skipCheckin() {
+    flow.active = false;
+    showView('home');
+  }
+
   function saveCheckin() {
     const coughYes = segVal('cough') === 'Yes';
-    const mucusYes = coughYes && segVal('mucus') === 'Yes';
+    const mucusYes = segVal('mucus') === 'Yes';
     const fields = {
       epoch: Math.floor(Date.now() / 1000),
       breaths: flow.reps.length,
@@ -1460,7 +1513,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       chestTightness: $('ciChest').value,
       dryMouth: segVal('dryMouth'),
       cough: segVal('cough'),
-      mucus: coughYes ? segVal('mucus') : '',
+      mucus: segVal('mucus'),
       mucusColour: mucusYes ? segVal('mucusColour') : '',
       thickness: mucusYes ? segVal('thickness') : '',
       amount: mucusYes ? segVal('amount') : '',
